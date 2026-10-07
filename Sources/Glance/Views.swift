@@ -1,17 +1,17 @@
 import AppKit
 import SwiftUI
 
-enum DashboardSurface { case menuBar, panel }
-
 struct DashboardView: View {
   @ObservedObject var store: AppStore
-  var surface: DashboardSurface
-  var togglePanel: (() -> Void)?
-  var openSettings: (() -> Void)?
-  var didOpenPullRequest: (() -> Void)?
+  @ObservedObject var keys: KeybindingStore
+  let commands: ApplicationCommands
+  var close: (() -> Void)?
   @State private var searchText = ""
+  @State private var snoozedIsCollapsed = true
   @State private var detailRowID: DashboardNavigation.RowID?
   @State private var selectedPullRequestID: DashboardNavigation.RowID?
+  @State private var matcher = KeybindingMatcher()
+  @State private var sequenceExpiry: Task<Void, Never>?
   @FocusState private var isSearchFocused: Bool
   @FocusState private var isDashboardFocused: Bool
 
@@ -21,11 +21,12 @@ struct DashboardView: View {
       searchField
       Divider()
       if let message = store.storageErrorMessage { errorBanner(message) }
+      if let message = keys.errorMessage ?? keys.registrationError { errorBanner(message) }
       if store.errorMessage != nil, store.snapshots.isEmpty {
         if store.connectionIssue == .authentication {
-          GitHubSetupView(store: store)
+          GitHubSetupView(store: store, refresh: { perform(.refresh) })
         } else {
-          GitHubUnavailableView(store: store)
+          GitHubUnavailableView(store: store, refresh: { perform(.refresh) })
         }
       } else {
         ScrollViewReader { proxy in
@@ -49,14 +50,15 @@ struct DashboardView: View {
         }
       }
       if let dismissal = store.dismissalToUndo {
-        DismissalUndoBanner(store: store, title: dismissal.title)
+          DismissalUndoBanner(store: store, title: dismissal.title, undo: { perform(.undoDismissal) })
           .padding(.horizontal, 10).padding(.vertical, 6)
       }
       Divider()
+      if !matcher.prefix.isEmpty { sequenceHints }
       footer
     }
     .frame(
-      minWidth: 310, idealWidth: surface == .menuBar ? 390 : 410, minHeight: 320, idealHeight: 590
+      minWidth: 310, idealWidth: 410, minHeight: 320, idealHeight: 590
     )
     .background(.regularMaterial)
     .background {
@@ -67,7 +69,13 @@ struct DashboardView: View {
         .accessibilityHidden(true)
     }
     .onAppear { isDashboardFocused = true }
+    .background(DashboardKeyboardInput(handle: handleKey, cancel: cancelSequence))
+    .onDisappear { cancelSequence() }
+    .onChange(of: keys.resolved.configuration) { _, _ in cancelSequence() }
+    .onChange(of: isSearchFocused) { _, _ in cancelSequence() }
+    .onChange(of: detailRowID) { _, _ in cancelSequence() }
     .onChange(of: navigation.rows.map(\.id)) { _, _ in
+      cancelSequence()
       let reconciledSelection = navigation.reconciled(selectedPullRequestID)
       let lostFocusedRow = reconciledSelection != selectedPullRequestID
         || navigation.reconciled(detailRowID) != detailRowID
@@ -82,59 +90,10 @@ struct DashboardView: View {
         }
       }
     }
-    .onKeyPress(.downArrow) {
-      guard !isSearchFocused, detailRowID == nil else { return .ignored }
-      moveSelection(by: 1)
-      return .handled
-    }
-    .onKeyPress(.upArrow) {
-      guard !isSearchFocused, detailRowID == nil else { return .ignored }
-      moveSelection(by: -1)
-      return .handled
-    }
-    .onKeyPress("j") {
-      guard !isSearchFocused, detailRowID == nil else { return .ignored }
-      moveSelection(by: 1)
-      return .handled
-    }
-    .onKeyPress("k") {
-      guard !isSearchFocused, detailRowID == nil else { return .ignored }
-      moveSelection(by: -1)
-      return .handled
-    }
-    .onKeyPress("/") {
-      guard !isSearchFocused, detailRowID == nil else { return .ignored }
-      isSearchFocused = true
-      return .handled
-    }
-    .onKeyPress(.return) {
-      guard !isSearchFocused, detailRowID == nil else { return .ignored }
-      return performSelected { openPullRequest($0) }
-    }
-    .onKeyPress("i") {
-      guard !isSearchFocused, detailRowID == nil, let selectedPullRequestID else { return .ignored }
-      detailRowID = selectedPullRequestID
-      return .handled
-    }
-    .onKeyPress("d") {
-      guard !isSearchFocused, detailRowID == nil else { return .ignored }
-      return performSelected { store.dismiss($0) }
-    }
-    .onKeyPress("p") {
-      guard !isSearchFocused, detailRowID == nil else { return .ignored }
-      return performSelected { store.togglePin($0) }
-    }
-    .onKeyPress("r") {
-      guard !isSearchFocused, detailRowID == nil else { return .ignored }
-      store.refresh()
-      return .handled
-    }
     .overlay(alignment: .bottomTrailing) {
-      if case .panel = surface {
-        ResizeGrip()
-          .padding(5)
-          .allowsHitTesting(false)
-      }
+      ResizeGrip()
+        .padding(5)
+        .allowsHitTesting(false)
     }
     .task { store.start() }
   }
@@ -146,16 +105,16 @@ struct DashboardView: View {
       TextField("Search pull requests", text: $searchText)
         .textFieldStyle(.plain)
         .focused($isSearchFocused)
-        .help("Search pull requests (/)")
+        .help(keys.help(for: .search))
       if !searchText.isEmpty {
         Button {
-          searchText = ""
+          perform(.clearSearch)
         } label: {
           Image(systemName: "xmark.circle.fill")
             .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
-        .help("Clear search")
+        .help(keys.help(for: .clearSearch))
         .accessibilityLabel("Clear search")
       }
     }
@@ -178,7 +137,7 @@ struct DashboardView: View {
       }
       Spacer()
       Button {
-        store.refresh()
+        perform(.refresh)
       } label: {
         if store.isRefreshing {
           ProgressView()
@@ -191,23 +150,14 @@ struct DashboardView: View {
       }
       .buttonStyle(.borderless)
       .disabled(store.isRefreshing)
-      .help("Refresh now (R)")
-      if surface == .menuBar {
-        Button {
-          togglePanel?()
-        } label: {
-          Image(systemName: "macwindow.on.rectangle")
-        }
-        .buttonStyle(.borderless)
-        .help("Show floating panel")
-      }
+      .nativeHelp(keys.help(for: .refresh))
       Button {
-        openSettings?()
+        perform(.settings)
       } label: {
         Image(systemName: "gearshape")
       }
       .buttonStyle(.borderless)
-      .help("Settings")
+      .nativeHelp(keys.help(for: .settings))
       .accessibilityLabel("Settings")
     }
     .padding(.horizontal, 14)
@@ -239,17 +189,15 @@ struct DashboardView: View {
             PullRequestRow(
               pullRequest: pullRequest,
               preferences: store.preferences,
-              open: {
-                store.open(pullRequest)
-                didOpenPullRequest?()
+              keys: keys,
+              perform: { perform($0, target: target(for: pullRequest, section: section)) },
+              editRepositoryColor: {
+                detailRowID = nil
+                commands.showRepositoryColors(for: pullRequest.repository)
               },
-              dismiss: { store.dismiss(pullRequest) },
-              togglePin: { store.togglePin(pullRequest) },
-              snooze: { store.snooze(pullRequest, condition: $0) },
               isPinned: store.preferences.pinnedPullRequests.contains(pullRequest.id),
               isSelected: selectedPullRequestID == rowID(section, pullRequest),
               select: { selectedPullRequestID = rowID(section, pullRequest) },
-              navigate: moveSelection,
               isShowingDetails: Binding(
                 get: { detailRowID == rowID(section, pullRequest) },
                 set: { detailRowID = $0 ? rowID(section, pullRequest) : nil }),
@@ -270,7 +218,7 @@ struct DashboardView: View {
       }
     } header: {
       Button {
-        store.toggleCollapse(section)
+        perform(.toggleSection, target: CommandTarget(section: section))
       } label: {
         HStack(spacing: 7) {
           Image(systemName: section.isCollapsed ? "chevron.right" : "chevron.down")
@@ -294,7 +242,8 @@ struct DashboardView: View {
   private var navigation: DashboardNavigation {
     DashboardNavigation(
       sections: store.preferences.sections.map { ($0, store.pullRequests(in: $0)) },
-      query: searchText)
+      query: searchText, snoozed: store.snoozedPullRequests,
+      snoozedIsCollapsed: snoozedIsCollapsed)
   }
 
   private func rowID(_ section: PRSection, _ pullRequest: PullRequest) -> DashboardNavigation.RowID {
@@ -303,50 +252,138 @@ struct DashboardView: View {
 
   private var snoozedSection: some View {
     Section {
-      ForEach(filtered(store.snoozedPullRequests)) { pullRequest in
-        HStack(spacing: 10) {
-          VStack(alignment: .leading, spacing: 2) {
-            Text("\(pullRequest.repository) #\(String(pullRequest.number))")
-              .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            Text(pullRequest.title).font(.callout).lineLimit(1)
+      if !snoozedIsCollapsed {
+        ForEach(navigation.items(in: DashboardNavigation.snoozedSectionID)) { pullRequest in
+          HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+              HStack(spacing: 4) {
+                RepositoryNameLabel(repository: pullRequest.repository,
+                  color: store.preferences.repositoryColor(for: pullRequest.repository),
+                  editColor: { commands.showRepositoryColors(for: pullRequest.repository) })
+                  .lineLimit(1)
+                Text(verbatim: "#\(pullRequest.number)").foregroundStyle(.secondary).fixedSize()
+              }
+              .font(.caption)
+              Text(pullRequest.title).font(.callout).lineLimit(1)
+            }
+            Spacer()
+            Button("Wake") { perform(.wake, target: CommandTarget(pullRequest: pullRequest)) }
+              .buttonStyle(.borderless).help(keys.help(for: .wake))
           }
-          Spacer()
-          Button("Wake") { store.unsnooze(pullRequest) }.buttonStyle(.borderless)
+          .contentShape(Rectangle())
+          .onTapGesture {
+            selectedPullRequestID = .init(sectionID: DashboardNavigation.snoozedSectionID, pullRequestID: pullRequest.id)
+            isDashboardFocused = true
+          }
+          .background(selectedPullRequestID?.sectionID == DashboardNavigation.snoozedSectionID
+            && selectedPullRequestID?.pullRequestID == pullRequest.id ? Color.accentColor.opacity(0.16) : .clear)
+          .id(DashboardNavigation.RowID(sectionID: DashboardNavigation.snoozedSectionID, pullRequestID: pullRequest.id))
+          .accessibilityAddTraits(selectedPullRequestID?.pullRequestID == pullRequest.id ? .isSelected : [])
+          .padding(.horizontal, 13).padding(.vertical, 8)
         }
-        .padding(.horizontal, 13).padding(.vertical, 8)
       }
     } header: {
-      HStack {
-        Image(systemName: "clock")
-        Text("Snoozed").font(.subheadline.weight(.medium))
-        Spacer()
-        Text("\(store.snoozedPullRequests.count)").font(.caption.monospacedDigit())
+      Button {
+        snoozedIsCollapsed.toggle()
+      } label: {
+        HStack(spacing: 7) {
+          Image(systemName: snoozedIsCollapsed ? "chevron.right" : "chevron.down")
+            .font(.caption2.weight(.bold))
+          Image(systemName: "clock")
+          Text("Snoozed").font(.subheadline.weight(.medium))
+          Spacer()
+          Text("\(store.snoozedPullRequests.count)").font(.caption.monospacedDigit())
+        }
+        .foregroundStyle(.secondary).padding(.horizontal, 13).padding(.vertical, 5)
+        .contentShape(Rectangle())
       }
-      .foregroundStyle(.secondary).padding(.horizontal, 13).padding(.vertical, 5)
+      .buttonStyle(.plain)
+      .accessibilityValue(snoozedIsCollapsed ? "Collapsed" : "Expanded")
+      .help(snoozedIsCollapsed ? "Show Snoozed" : "Hide Snoozed")
       .background(.regularMaterial)
     }
   }
 
-  private func filtered(_ pullRequests: [PullRequest]) -> [PullRequest] {
-    DashboardNavigation.filtered(pullRequests, query: searchText)
+  private func navigate(_ action: GlanceAction) {
+    // AppKit details buttons can own first responder while SwiftUI still reports dashboard focus.
+    // Force a focus transition so Return acts on the newly selected row, not the old trigger.
+    isDashboardFocused = false
+    DispatchQueue.main.async { isDashboardFocused = true }
+    switch action {
+    case .firstPR: selectedPullRequestID = navigation.rows.first?.id
+    case .lastPR: selectedPullRequestID = navigation.rows.last?.id
+    default: selectedPullRequestID = navigation.moved(from: selectedPullRequestID, by: action == .nextPR ? 1 : -1)
+    }
   }
 
-  private func moveSelection(by offset: Int) {
-    isDashboardFocused = true
-    selectedPullRequestID = navigation.moved(from: selectedPullRequestID, by: offset)
+  private var selectedTarget: CommandTarget {
+    let pr = navigation.pullRequest(for: selectedPullRequestID)
+    let section = store.preferences.sections.first { $0.id == selectedPullRequestID?.sectionID }
+    return target(for: pr, section: section)
   }
 
-  private func performSelected(_ action: (PullRequest) -> Void) -> KeyPress.Result {
-    guard let pullRequest = navigation.pullRequest(for: selectedPullRequestID)
-    else { return .ignored }
-    if !isSearchFocused { isDashboardFocused = true }
-    action(pullRequest)
-    return .handled
+  private func target(for pr: PullRequest?, section: PRSection?) -> CommandTarget {
+    CommandTarget(
+      pullRequest: pr, section: section,
+      navigate: navigation.rows.isEmpty ? nil : navigate,
+      focusSearch: { isSearchFocused = true },
+      clearSearch: searchText.isEmpty ? nil : { searchText = "" },
+      showDetails: pr == nil || section == nil ? nil : {
+        if let pr, let section { detailRowID = rowID(section, pr) }
+      },
+      close: close)
   }
 
-  private func openPullRequest(_ pullRequest: PullRequest) {
-    store.open(pullRequest)
-    didOpenPullRequest?()
+  private func perform(_ action: GlanceAction, target: CommandTarget? = nil) {
+    _ = commands.perform(action, target: target ?? selectedTarget)
+  }
+
+  private func handleKey(_ chord: KeyChord, textEditing: Bool, nativeControl: Bool, isRepeat: Bool) -> Bool {
+    if detailRowID != nil || (nativeControl && chord.modifiers.isEmpty
+      && ["return", "space", "up", "down", "left", "right"].contains(chord.key)) {
+      cancelSequence()
+      return false
+    }
+    let target = selectedTarget
+    let result = matcher.handle(chord, at: ProcessInfo.processInfo.systemUptime,
+      bindings: keys.resolved, textEditing: textEditing || isSearchFocused, isRepeat: isRepeat,
+      enabled: { commands.canPerform($0, target: target) })
+    sequenceExpiry?.cancel()
+    if let deadline = matcher.deadline {
+      sequenceExpiry = Task { @MainActor in
+        let delay = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        guard !Task.isCancelled else { return }
+        cancelSequence()
+      }
+    }
+    switch result {
+    case .ignored: return false
+    case .consumed: return true
+    case .action(let action): return commands.perform(action, target: target)
+    }
+  }
+
+  private func cancelSequence() {
+    sequenceExpiry?.cancel()
+    sequenceExpiry = nil
+    matcher.reset()
+  }
+
+  private var sequenceHints: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(matcher.prefix.map(\.display).joined(separator: " → ") + " — Esc to cancel")
+        .font(.caption.weight(.semibold))
+      ForEach(matcher.continuations(in: keys.resolved, enabled: { commands.canPerform($0, target: selectedTarget) }), id: \.0.text) { sequence, action in
+        HStack {
+          Text(sequence.chords.dropFirst(matcher.prefix.count).map(\.display).joined(separator: " → "))
+            .font(.caption.monospaced())
+          Text(action.title).font(.caption)
+        }
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(10).background(.bar)
   }
 
   private func errorBanner(_ message: String) -> some View {
@@ -380,6 +417,7 @@ struct DashboardView: View {
 private struct DismissalUndoBanner: View {
   @ObservedObject var store: AppStore
   let title: String
+  let undo: () -> Void
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var isHovered = false
   @State private var pauseID = UUID()
@@ -396,7 +434,7 @@ private struct DismissalUndoBanner: View {
         .lineLimit(1)
         .help(title)
       Spacer(minLength: 0)
-      Button("Undo", action: store.undoDismissal)
+      Button("Undo", action: undo)
         .buttonStyle(.bordered)
         .controlSize(.small)
         .focused($isFocused)
@@ -545,28 +583,23 @@ private struct OverlayScrollViewConfigurator: NSViewRepresentable {
   }
 }
 
-private struct PullRequestRow: View {
+struct PullRequestRow: View {
+  private static let verticalInset: CGFloat = 11
+  private static let summaryLineHeight: CGFloat = 17
+  private static let detailButtonHeight: CGFloat = 22
+
   let pullRequest: PullRequest
   let preferences: Preferences
-  let open: () -> Void
-  let dismiss: () -> Void
-  let togglePin: () -> Void
-  let snooze: (SnoozeCondition) -> Void
+  @ObservedObject var keys: KeybindingStore
+  let perform: (GlanceAction) -> Void
+  let editRepositoryColor: () -> Void
   let isPinned: Bool
   let isSelected: Bool
   let select: () -> Void
-  let navigate: (Int) -> Void
   @Binding var isShowingDetails: Bool
   let checksAreCached: Bool
   @State private var detailFocusRequest = 0
   @State private var hovering = false
-
-  private var displayedDate: Date {
-    if preferences.timeDisplayMode == .reviewRequested {
-      return pullRequest.personalReviewRequestedAt ?? pullRequest.createdAt
-    }
-    return pullRequest.createdAt
-  }
 
   var body: some View {
     ZStack(alignment: .topTrailing) {
@@ -574,15 +607,20 @@ private struct PullRequestRow: View {
       DetailActionButton(
         label: "Details for \(pullRequest.repository) #\(pullRequest.number)",
         focusRequest: detailFocusRequest,
-        navigate: navigate
+        help: keys.help(for: .details)
       ) {
         select()
-        isShowingDetails = true
+        perform(.details)
       }
-      .frame(width: 28, height: 22)
-      .padding(.top, 4).padding(.trailing, 5)
+      .frame(width: 28, height: Self.detailButtonHeight)
+      // Centered on the summary line.
+      .padding(.top, Self.verticalInset + (Self.summaryLineHeight - Self.detailButtonHeight) / 2)
+      .padding(.trailing, 5)
       .popover(isPresented: $isShowingDetails, arrowEdge: .trailing) {
-        PullRequestDetailsView(pullRequest: pullRequest, checksAreCached: checksAreCached) {
+        PullRequestDetailsView(pullRequest: pullRequest, checksAreCached: checksAreCached,
+          repositoryColor: preferences.repositoryColor(for: pullRequest.repository),
+          editRepositoryColor: editRepositoryColor,
+          copy: { perform(.copyTitle) }) {
           isShowingDetails = false
         }
       }
@@ -595,68 +633,12 @@ private struct PullRequestRow: View {
   private var rowButton: some View {
     Button(action: handleClick) {
       VStack(alignment: .leading, spacing: 4) {
-        HStack(spacing: 4) {
-          Text(pullRequest.repository).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-            .lineLimit(1)
-          Text(verbatim: "#\(pullRequest.number)").font(.caption.monospacedDigit()).foregroundStyle(
-            .primary)
-          if let position = pullRequest.stackPosition, let size = pullRequest.stackSize, size > 1 {
-            StackBadge(position: position, size: size)
-          }
-          if pullRequest.isDraft { DraftBadge() }
-          if isPinned {
-            Image(systemName: "pin.fill")
-              .font(.caption2).foregroundStyle(.secondary)
-              .help("Pinned")
-              .accessibilityLabel("Pinned pull request")
-          }
-        }
-        .padding(.trailing, 24)
-        Text(pullRequest.title).font(.callout).foregroundStyle(.primary).lineLimit(2)
+        summaryLine
+          .padding(.trailing, 20)
+        Text(pullRequest.title).font(.callout).foregroundStyle(.primary).lineLimit(1)
           .multilineTextAlignment(.leading)
-        if preferences.showAttentionReason, pullRequest.attention.reason != .draft {
-          AttentionReasonLabel(summary: pullRequest.attention)
-        }
-        HStack(spacing: 7) {
-          if preferences.showAuthor {
-            AvatarView(url: pullRequest.authorAvatarURL)
-            Text(pullRequest.author).lineLimit(1)
-          }
-          if preferences.showAuthor && preferences.showUpdatedAt { Text("·") }
-          if preferences.showUpdatedAt {
-            Text(displayedDate.ageLabel)
-              .help(preferences.timeDisplayMode == .created ? "PR created" : "Review requested")
-          }
-          if preferences.showLineChanges {
-            if preferences.showAuthor || preferences.showUpdatedAt { Text("·") }
-            HStack(spacing: 4) {
-              Text(verbatim: "+\(pullRequest.additions)").foregroundStyle(.green)
-              Text(verbatim: "−\(pullRequest.deletions)").foregroundStyle(.red)
-            }
-            .fontDesign(.monospaced)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(
-              "\(pullRequest.additions) additions, \(pullRequest.deletions) deletions")
-            .help("Lines changed")
-          }
-          if preferences.statusDisplayMode == .compactIcons {
-            Spacer(minLength: 4)
-            if preferences.showReviewStatus { reviewLabel(showText: false) }
-            if preferences.showCheckStatus { checkLabel(showText: false) }
-          }
-        }
-        .font(.caption).foregroundStyle(.secondary)
-        if preferences.statusDisplayMode == .labeled
-          && (preferences.showReviewStatus || preferences.showCheckStatus)
-        {
-          HStack(spacing: 10) {
-            if preferences.showReviewStatus { reviewLabel(showText: true) }
-            if preferences.showCheckStatus { checkLabel(showText: true) }
-          }
-          .padding(.top, 1)
-        }
       }
-      .padding(.horizontal, 13).padding(.vertical, 9)
+      .padding(.horizontal, 13).padding(.vertical, Self.verticalInset)
       .frame(maxWidth: .infinity, alignment: .leading)
       .contentShape(Rectangle())
       .background(
@@ -668,34 +650,25 @@ private struct PullRequestRow: View {
     .onHover { hovering = $0 }
     .simultaneousGesture(TapGesture().onEnded(select))
     .accessibilityAddTraits(isSelected ? .isSelected : [])
-    .help(Text(verbatim: "Open #\(pullRequest.number) on GitHub"))
+    .accessibilityHint(Text(verbatim: "Open #\(pullRequest.number) on GitHub"))
+    // A row-wide .help overrides every nested icon's caption in SwiftUI.
     .contextMenu {
-      Button("Open on GitHub", action: open)
-      Button("Copy URL") {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(pullRequest.url.absoluteString, forType: .string)
-      }
-      Button("Copy Branch") {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(pullRequest.branch, forType: .string)
-      }
+      Button("Open on GitHub") { perform(.openPR) }.help(keys.help(for: .openPR))
+      Button("Copy Title") { perform(.copyTitle) }.help(keys.help(for: .copyTitle))
+      Button("Copy URL") { perform(.copyURL) }.help(keys.help(for: .copyURL))
+      Button("Copy Branch") { perform(.copyBranch) }.help(keys.help(for: .copyBranch))
+      Button("Change Repo Color…", action: editRepositoryColor)
       Divider()
-      Button(isPinned ? "Unpin" : "Pin", action: togglePin)
-        .help("Pin or unpin the selected pull request (P)")
+      Button(isPinned ? "Unpin" : "Pin") { perform(.pin) }
+        .help(keys.help(for: .pin))
       Menu("Snooze") {
-        Button("For one hour") { snooze(.until(Date().addingTimeInterval(3_600))) }
-        Button("Until this time tomorrow") {
-          snooze(.until(Calendar.current.date(byAdding: .day, value: 1, to: Date())!))
-        }
-        Button("For one week") {
-          snooze(.until(Calendar.current.date(byAdding: .day, value: 7, to: Date())!))
-        }
-        Button("Until This Pull Request Changes") {
-          snooze(.revisionChanges(pullRequest.revisionKey))
-        }
+        Button("For one hour") { perform(.snoozeHour) }.help(keys.help(for: .snoozeHour))
+        Button("Until this time tomorrow") { perform(.snoozeTomorrow) }.help(keys.help(for: .snoozeTomorrow))
+        Button("For one week") { perform(.snoozeWeek) }.help(keys.help(for: .snoozeWeek))
+        Button("Until This Pull Request Changes") { perform(.snoozeChanges) }.help(keys.help(for: .snoozeChanges))
         if pullRequest.checksState == .pending {
           Button("Until Checks Finish") {
-            snooze(.checksComplete(pullRequest.revisionKey))
+            perform(.snoozeChecks)
           }
         }
       }
@@ -706,49 +679,133 @@ private struct PullRequestRow: View {
     if preferences.commandClickDismisses,
       NSApp.currentEvent?.modifierFlags.contains(.command) == true
     {
-      dismiss()
+      perform(.dismiss)
     } else {
-      open()
+      perform(.openPR)
     }
   }
 
-  @ViewBuilder private func checkLabel(showText: Bool) -> some View {
-    switch pullRequest.checksState {
-    case .success:
-      StatusLabel(icon: .checksPassed, text: "Checks passed", color: .statusGreen, showText: showText)
-    case .failure:
-      StatusLabel(icon: .checksFailed, text: "Checks failed", color: .red, showText: showText)
-    case .pending:
-      StatusLabel(icon: .checksRunning, text: "Checks running", color: .orange, showText: showText)
-    case .neutral:
-      if showText {
-        Label("Checks neutral", systemImage: "minus.circle")
-          .font(.caption2).foregroundStyle(.secondary)
-          .help("Checks neutral")
-      } else {
-        Image(systemName: "minus.circle")
-          .help("Checks neutral").accessibilityLabel("Checks neutral")
+  private var summaryLine: some View {
+    HStack(spacing: 7) {
+      HStack(spacing: 7) {
+        if preferences.showReviewStatus || preferences.showCheckStatus { statusSlots }
+        if preferences.showAttentionReason, let attention = pullRequest.rowAttention {
+          AttentionReasonIcon(summary: attention).fixedSize()
+        }
+        identity.layoutPriority(1)
+        if preferences.showAuthor { author }
+        if preferences.showLineChanges { lineChanges }
       }
-    case .unknown: EmptyView()
+      // Not a Spacer, which would compete with the author for width.
+      .frame(maxWidth: .infinity, alignment: .leading)
+      if preferences.showUpdatedAt {
+        let time = pullRequest.displayedTime(for: preferences.timeDisplayMode)
+        ElapsedTimeLabel(date: time.date, event: time.mode.title)
+      }
+    }
+    // Muted below standard secondary so the title stands apart from its metadata.
+    .font(.caption).foregroundStyle(.secondary.opacity(0.8))
+    .frame(minHeight: Self.summaryLineHeight)
+  }
+
+  // Fixed slots keep the status group aligned when a status is absent.
+  private var statusSlots: some View {
+    HStack(spacing: 4) {
+      if preferences.showReviewStatus { reviewIcon.frame(width: 11, height: 11) }
+      if preferences.showCheckStatus { checkIcon.frame(width: 11, height: 11) }
     }
   }
 
-  @ViewBuilder private func reviewLabel(showText: Bool) -> some View {
+  private var identity: some View {
+    HStack(spacing: 4) {
+      RepositoryNameLabel(repository: pullRequest.repository,
+        color: preferences.repositoryColor(for: pullRequest.repository), editColor: editRepositoryColor)
+        .font(.caption.weight(.medium)).lineLimit(1)
+      Text(verbatim: "#\(pullRequest.number)").font(.caption.monospacedDigit()).fixedSize()
+      if let position = pullRequest.stackPosition, let size = pullRequest.stackSize, size > 1 {
+        StackBadge(position: position, size: size).fixedSize()
+      }
+      if pullRequest.isDraft {
+        OcticonImage(icon: .draft, size: 11)
+          .nativeHelp("Draft pull request")
+      }
+      if isPinned {
+        Image(systemName: "pin.fill")
+          .font(.caption2)
+          .nativeHelp("Pinned")
+          .accessibilityLabel("Pinned pull request")
+      }
+    }
+  }
+
+  private var author: some View {
+    HStack(spacing: 0) {
+      AvatarView(url: pullRequest.authorAvatarURL)
+      // A fragment such as "m…" says less than the avatar alone.
+      ViewThatFits(in: .horizontal) {
+        Text(pullRequest.author).lineLimit(1).padding(.leading, 4)
+        Color.clear.frame(width: 0, height: 0)
+      }
+    }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(pullRequest.author)
+    .nativeHelp(pullRequest.author)
+  }
+
+  private var lineChanges: some View {
+    HStack(spacing: 4) {
+      Text(verbatim: "+\(pullRequest.additions)").foregroundStyle(.green)
+      Text(verbatim: "−\(pullRequest.deletions)").foregroundStyle(.red)
+    }
+    .fontDesign(.monospaced)
+    .fixedSize()
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(
+      "\(pullRequest.additions) additions, \(pullRequest.deletions) deletions")
+    .nativeHelp("Lines changed")
+  }
+
+  @ViewBuilder private var checkIcon: some View {
+    switch pullRequest.checksState {
+    case .success: StatusIcon(icon: .checksPassed, text: "Checks passed", color: .statusGreen)
+    case .failure: StatusIcon(icon: .checksFailed, text: "Checks failed", color: .red)
+    case .pending: StatusIcon(icon: .checksRunning, text: "Checks running", color: .orange)
+    case .neutral:
+      Image(systemName: "minus.circle").resizable().scaledToFit()
+        .nativeHelp("Checks neutral").accessibilityLabel("Checks neutral")
+    case .unknown: Color.clear
+    }
+  }
+
+  @ViewBuilder private var reviewIcon: some View {
     switch pullRequest.reviewDecision {
-    case "APPROVED":
-      StatusLabel(icon: .approved, text: "Approved", color: .statusGreen, showText: showText)
+    case "APPROVED": StatusIcon(icon: .approved, text: "Approved", color: .statusGreen)
     case "CHANGES_REQUESTED":
-      StatusLabel(
-        icon: .changesRequested, text: "Changes requested", color: .red, showText: showText)
-    case "REVIEW_REQUIRED":
-      PendingReviewLabel(showText: showText)
-    default:
-      EmptyView()
+      StatusIcon(icon: .changesRequested, text: "Changes requested", color: .red)
+    case "REVIEW_REQUIRED": PendingReviewIcon()
+    default: Color.clear
     }
   }
 }
 
-private struct AttentionReasonLabel: View {
+private struct ElapsedTimeLabel: View {
+  let date: Date
+  let event: String
+
+  var body: some View {
+    // Aligned to the date itself, so each tick lands exactly when another minute has elapsed.
+    TimelineView(.periodic(from: date, by: 60)) { context in
+      let elapsed = ElapsedTime(from: date, to: context.date)
+      Text(verbatim: elapsed.abbreviated)
+        .accessibilityLabel(Text(verbatim: "\(event) \(elapsed.spoken) ago"))
+    }
+    .font(.caption.monospacedDigit())
+    .fixedSize()
+    .nativeHelp("\(event) \(date.formatted(date: .abbreviated, time: .shortened))")
+  }
+}
+
+private struct AttentionReasonIcon: View {
   let summary: PRAttentionSummary
 
   private var symbol: String {
@@ -778,32 +835,25 @@ private struct AttentionReasonLabel: View {
   }
 
   var body: some View {
-    Label {
-      Text(summary.message).foregroundStyle(.primary)
-    } icon: {
-      Image(systemName: symbol).foregroundStyle(color)
-    }
-      .font(.caption2.weight(.medium))
-      .lineLimit(1)
-      .help(summary.message)
+    Image(systemName: symbol)
+      .resizable()
+      .scaledToFit()
+      .frame(width: 11, height: 11)
+      .foregroundStyle(color)
+      .nativeHelp(summary.message)
+      .accessibilityElement(children: .ignore)
       .accessibilityLabel("Attention status: \(summary.message)")
   }
 }
 
-private struct PendingReviewLabel: View {
-  let showText: Bool
-
+private struct PendingReviewIcon: View {
   var body: some View {
-    HStack(spacing: 4) {
-      Circle()
-        .fill(.yellow)
-        .frame(width: 11, height: 11)
-      if showText { Text("Review pending").foregroundStyle(.secondary) }
-    }
-    .font(.caption2)
-    .help("Review pending")
-    .accessibilityElement(children: .ignore)
-    .accessibilityLabel("Review pending")
+    Circle()
+      .fill(.yellow)
+      .frame(width: 11, height: 11)
+      .nativeHelp("Review pending")
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel("Review pending")
   }
 }
 
@@ -822,39 +872,17 @@ private struct ResizeGrip: View {
   }
 }
 
-private struct StatusLabel: View {
+private struct StatusIcon: View {
   let icon: Octicon
   let text: String
   let color: Color
-  let showText: Bool
 
   var body: some View {
-    HStack(spacing: 4) {
-      OcticonImage(icon: icon, size: 11)
-        .foregroundStyle(color)
-      if showText { Text(text).foregroundStyle(.secondary) }
-    }
-    .font(.caption2)
-    .help(text)
-    .accessibilityElement(children: .ignore)
-    .accessibilityLabel(text)
-  }
-}
-
-private struct DraftBadge: View {
-  var body: some View {
-    HStack(spacing: 3) {
-      OcticonImage(icon: .draft, size: 10)
-      Text("Draft")
-    }
-    .font(.caption2.weight(.medium))
-    .foregroundStyle(.secondary)
-    .padding(.horizontal, 5)
-    .padding(.vertical, 2)
-    .background(Color.primary.opacity(0.08), in: Capsule())
-    .help("Draft pull request")
-    .accessibilityElement(children: .ignore)
-    .accessibilityLabel("Draft")
+    OcticonImage(icon: icon, size: 11)
+      .foregroundStyle(color)
+      .nativeHelp(text)
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(text)
   }
 }
 
@@ -868,11 +896,10 @@ private struct StackBadge: View {
       Text(verbatim: "\(position)/\(size)")
     }
     .font(.caption2.weight(.medium).monospacedDigit())
-    .foregroundStyle(.secondary)
     .padding(.horizontal, 5)
     .padding(.vertical, 2)
     .background(Color.primary.opacity(0.06), in: Capsule())
-    .help(Text(verbatim: "Stacked pull request \(position) of \(size)"))
+    .nativeHelp("Stacked pull request \(position) of \(size)")
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(Text(verbatim: "Stacked pull request \(position) of \(size)"))
   }
@@ -897,6 +924,7 @@ private struct AvatarView: View {
 
 private struct GitHubSetupView: View {
   @ObservedObject var store: AppStore
+  let refresh: () -> Void
 
   var body: some View {
     ContentUnavailableView {
@@ -908,7 +936,7 @@ private struct GitHubSetupView: View {
     } actions: {
       HStack {
         Link("Get GitHub CLI", destination: URL(string: "https://cli.github.com/")!)
-        Button("Try Again") { store.refresh() }
+        Button("Try Again", action: refresh)
           .help("Check your GitHub connection")
       }
     }
@@ -919,6 +947,7 @@ private struct GitHubSetupView: View {
 
 private struct GitHubUnavailableView: View {
   @ObservedObject var store: AppStore
+  let refresh: () -> Void
 
   var body: some View {
     ContentUnavailableView {
@@ -928,7 +957,7 @@ private struct GitHubUnavailableView: View {
       Text(store.errorMessage ?? "Try refreshing again.")
         .textSelection(.enabled)
     } actions: {
-      Button("Try Again") { store.refresh() }
+      Button("Try Again", action: refresh)
         .help("Retry GitHub now")
     }
     .padding()

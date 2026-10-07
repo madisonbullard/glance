@@ -1,7 +1,7 @@
 import SwiftUI
 
-private enum SettingsCategory: String, CaseIterable, Identifiable {
-  case general, reviews, github, sections, updates
+enum SettingsCategory: String, CaseIterable, Identifiable {
+  case general, reviews, github, repoColors, sections, keyboard, updates
 
   var id: Self { self }
   var title: String {
@@ -9,7 +9,9 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     case .general: "General"
     case .reviews: "Pull requests"
     case .github: "GitHub"
+    case .repoColors: "Repo Colors"
     case .sections: "Sections"
+    case .keyboard: "Keyboard"
     case .updates: "Software Update"
     }
   }
@@ -18,7 +20,9 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     case .general: "gearshape"
     case .reviews: "arrow.triangle.branch"
     case .github: "chevron.left.forwardslash.chevron.right"
+    case .repoColors: "paintpalette"
     case .sections: "list.bullet.rectangle"
+    case .keyboard: "keyboard"
     case .updates: "arrow.triangle.2.circlepath"
     }
   }
@@ -27,9 +31,24 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     case .general: Color(nsColor: .systemGray)
     case .reviews: Color(nsColor: .systemIndigo)
     case .github: Color(nsColor: .systemBlue)
+    case .repoColors: Color(nsColor: .systemPink)
     case .sections: Color(nsColor: .systemTeal)
+    case .keyboard: Color(nsColor: .systemOrange)
     case .updates: Color(nsColor: .systemGreen)
     }
+  }
+}
+
+@MainActor
+final class SettingsNavigation: ObservableObject {
+  @Published var category: SettingsCategory = .general
+  @Published var repository: String?
+  @Published private(set) var repositoryColorRequest = 0
+
+  func showRepositoryColors(for repository: String) {
+    self.repository = repository.lowercased()
+    category = .repoColors
+    repositoryColorRequest &+= 1
   }
 }
 
@@ -66,12 +85,14 @@ struct GlanceSettingsView: View {
   @ObservedObject var store: AppStore
   @ObservedObject var panel: FloatingPanelController
   @ObservedObject var updates: UpdateController
-  @State private var selection: SettingsCategory = .general
+  @ObservedObject var keys: KeybindingStore
+  let commands: ApplicationCommands
+  @ObservedObject var navigation: SettingsNavigation
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
   var body: some View {
     NavigationSplitView(columnVisibility: $columnVisibility) {
-      List(SettingsCategory.allCases, selection: $selection) { category in
+      List(SettingsCategory.allCases, selection: $navigation.category) { category in
         SettingsCategoryLabel(category: category)
           .tag(category)
       }
@@ -87,12 +108,14 @@ struct GlanceSettingsView: View {
   }
 
   @ViewBuilder private var settingsPage: some View {
-    switch selection {
+    switch navigation.category {
     case .general: GeneralSettingsPage(store: store, panel: panel)
     case .reviews: ReviewSettingsPage(store: store)
-    case .github: GitHubSettingsPage(store: store)
+    case .github: GitHubSettingsPage(store: store, commands: commands)
+    case .repoColors: RepositoryColorsSettingsPage(store: store, navigation: navigation)
     case .sections: SectionSettingsView(store: store)
-    case .updates: UpdateSettingsPage(updates: updates)
+    case .keyboard: KeyboardSettingsPage(keys: keys)
+    case .updates: UpdateSettingsPage(updates: updates, commands: commands)
     }
   }
 }
@@ -134,19 +157,11 @@ private struct GeneralSettingsPage: View {
               store.preferences.panelLevel = $0 ? .floating : .desktop
               panel.applyLevel()
             }))
-          .help("Keep the detached panel in front of other windows while it is visible.")
-        Picker("Show or hide Glance", selection: $store.preferences.globalShortcut) {
-          ForEach(GlobalShortcut.allCases) { shortcut in Text(shortcut.title).tag(shortcut) }
-        }
-        .help("Choose a system-wide keyboard shortcut for the Glance panel.")
-        if let error = store.shortcutErrorMessage {
-          Label(error, systemImage: "exclamationmark.triangle")
-            .font(.caption).foregroundStyle(.orange)
-        }
+          .help("Keep the panel in front of other windows while it is visible.")
       } header: {
         Text("Window")
       } footer: {
-        Text("Keep the detached panel visible while you work in another app.")
+        Text("Drag the panel’s edges to resize it. Glance remembers its size and position across launches.")
       }
     }
   }
@@ -154,6 +169,7 @@ private struct GeneralSettingsPage: View {
 
 private struct UpdateSettingsPage: View {
   @ObservedObject var updates: UpdateController
+  let commands: ApplicationCommands
 
   var body: some View {
     SettingsForm {
@@ -170,7 +186,7 @@ private struct UpdateSettingsPage: View {
             set: { updates.setAutomaticallyDownloadsUpdates($0) })
         )
         .disabled(!updates.automaticallyChecksForUpdates)
-        Button("Check Now") { updates.checkForUpdates() }
+        Button("Check Now") { commands.perform(.checkForUpdates) }
           .disabled(!updates.canCheckForUpdates)
       }
       Section("Installed Version") {
@@ -245,11 +261,8 @@ private struct ReviewSettingsPage: View {
           }
         }
         Toggle("Additions and deletions", isOn: $store.preferences.showLineChanges)
-        Toggle("Attention reason", isOn: $store.preferences.showAttentionReason)
-          .help("Show why each pull request needs attention or what it is waiting for.")
-        Picker("Status layout", selection: $store.preferences.statusDisplayMode) {
-          ForEach(StatusDisplayMode.allCases) { mode in Text(mode.title).tag(mode) }
-        }
+        Toggle("Attention reason icon", isOn: $store.preferences.showAttentionReason)
+          .help("Show an icon before the repository name. Hover over it to see why the pull request needs attention or what it is waiting for.")
         Toggle("Review status", isOn: $store.preferences.showReviewStatus)
         Toggle("Check status", isOn: $store.preferences.showCheckStatus)
         Toggle(
@@ -278,6 +291,7 @@ private struct ReviewSettingsPage: View {
 
 private struct GitHubSettingsPage: View {
   @ObservedObject var store: AppStore
+  let commands: ApplicationCommands
   @State private var showingRepositoryPicker = false
   var body: some View {
     SettingsForm {
@@ -287,7 +301,7 @@ private struct GitHubSettingsPage: View {
         LabeledContent("Authentication") {
           HStack {
             Link("GitHub CLI Setup…", destination: URL(string: "https://cli.github.com/")!)
-            Button("Check Connection") { store.refresh() }
+            Button("Check Connection") { commands.perform(.refresh) }
           }
           .accessibilityElement(children: .contain)
         }

@@ -8,7 +8,8 @@
   A native macOS pull-request HUD for the work that needs your attention.
 </p>
 
-Glance keeps your GitHub pull requests one click away in the menu bar. Open its compact popover for a quick check, or detach it into an always-on-top panel while you work.
+Glance keeps your GitHub pull requests one click away in the menu bar. Click its icon or use the global hotkey to open the same resizable, always-on-top panel while you work.
+Click outside the panel to hide it; its details popovers remain part of the panel.
 
 <p align="center">
   <img src="docs/images/glance-panel.png" width="360" alt="Glance showing pull requests that need attention">
@@ -17,8 +18,8 @@ Glance keeps your GitHub pull requests one click away in the menu bar. Open its 
 ## What Glance does
 
 - Shows review requests, pull requests you opened, and any other sections you define with GitHub search queries.
-- Explains why a pull request needs attention, including review requests, new commits, failed
-  checks, unresolved conversations, merge conflicts, and merge readiness.
+- Explains why a pull request needs attention, including repeated review requests, new commits,
+  failed checks, unresolved conversations, merge conflicts, and merge readiness.
 - Surfaces draft, review, aggregate check, merge-queue, auto-merge, and stacked-pull-request status
   without opening a browser.
 - Displays an attention count directly in the menu bar.
@@ -34,7 +35,9 @@ Glance keeps your GitHub pull requests one click away in the menu bar. Open its 
 
 Command-click a pull request to dismiss its current revision. If a new commit is pushed, the pull request returns automatically. Use a row's context menu to pin it or snooze it.
 
-With the panel focused, use the arrow keys or J/K to move between pull requests, Return to open the selected pull request, D to dismiss it, P to pin it, R to refresh, and / to search.
+Press Control–Shift–Space to show and focus Glance from any app. Press it again while the panel has focus to hide it. With the dashboard focused, use the arrow keys or J/K to move between pull requests, Return to open the selected pull request, D to dismiss it, P to pin it, R to refresh, and / to search. Short sequences add more actions: C then U copies a URL; S then H snoozes for one hour. Prefixes show available next keys; Escape cancels.
+
+Settings → Keyboard lets you edit or record bindings. The same bindings live in `~/Library/Application Support/Glance/keybindings.json`, which reloads after external edits. See `docs/KEYBINDINGS.md` for all actions, defaults, config syntax, and focus rules.
 
 ## Install
 
@@ -69,13 +72,23 @@ Glance starts with sections for pull requests requesting your review and pull re
 
 - Add, rename, reorder, or remove sections backed by validated GitHub pull-request searches. The Add section Examples menu fills editable drafts for assigned PRs, your non-draft PRs, or a repository. Replace the repository template, validate, then add; visibility preferences still apply.
 - Include or exclude repositories with search and bulk selection.
+- Customize repository name colors in Settings → Repo Colors. New repositories cycle through ten
+  distinct presets, and assignments persist across launches and future pull requests. Choose a preset
+  or use the native color picker’s wheel for a custom color. Right-click a repository name and choose
+  Change Repo Color… to jump directly to its settings. Presets adapt to light and dark appearance;
+  custom colors stay exact.
 - Choose which pull requests contribute to the menu-bar count, including whether review requests
   also count pull requests you opened.
 - Sort each section by attention, review-request time, recent activity, repository, or stack order.
 - Control notifications, refresh frequency, launch behavior, and panel behavior.
+- Drag the panel’s edges or corners to resize it. The menu-bar icon and global hotkey open the same native window, and Glance remembers its size and position across launches.
 - Choose which pull-request transitions generate notifications and configure a global panel shortcut.
-- Adjust row details, including optional additions and deletions, status presentation, and
-  completed-review filtering.
+- Adjust row details, including optional additions and deletions, review and check status icons,
+  and completed-review filtering. Each row shows the time elapsed since the PR was created or
+  your review was requested, such as 5m, 3h, or 2d.
+- Rows stay two lines: metadata above a single-line title. Attention reasons appear as icons
+  between the status icons and repository name; hover over an icon for its caption. Open Details
+  to read or copy a full title when it is truncated.
 
 Click a pull request to open it on GitHub. Its context menu can also copy the URL or branch name.
 
@@ -93,7 +106,7 @@ Missing local files are normal on first launch. If existing files are damaged or
 
 Approved PRs hidden by your filters are omitted from the offline cache unless pinned. After a restart, making those filters less restrictive may require a successful refresh to bring the PRs back. A pin does not override a repository exclusion.
 
-Check icons summarize GitHub's aggregate rollup. Glance does not offer a complete check-detail viewer; open the PR on GitHub for individual logs and the full list. When fetched detail is incomplete, attention text avoids an exact failing-check count.
+Check icons summarize GitHub's aggregate rollup. Glance does not offer a complete check-detail viewer; open the PR on GitHub for individual logs and the full list. When fetched detail is incomplete, attention captions avoid an exact failing-check count.
 
 ## Build from source
 

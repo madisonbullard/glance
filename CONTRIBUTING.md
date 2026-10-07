@@ -20,12 +20,21 @@ Run the same core checks used by CI:
 ```sh
 zsh -n scripts/*.sh
 swift test
+zsh scripts/test-keybindings.sh
+zsh scripts/test-panel-window.sh
+zsh scripts/test-repository-color-window.sh
 ./scripts/build-app.sh release
-codesign --verify --deep --strict --verbose=2 dist/Glance.app
+zsh scripts/verify-app-signing.sh dist/Glance.app
 lipo dist/Glance.app/Contents/MacOS/Glance -verify_arch arm64 x86_64
 ```
 
-Local application bundles receive an ad-hoc signature when a Developer ID identity is not available. You do not need the maintainer's signing or notarization credentials to contribute.
+Local application bundles receive an ad-hoc signature without hardened runtime when a Developer ID identity is not available. This allows macOS to load bundled frameworks that have no Team ID. Certificate-signed builds keep hardened runtime and timestamping. You do not need the maintainer's signing or notarization credentials to contribute.
+
+`test-panel-window.sh` exercises the actual AppKit menu-bar button and panel, including resize notifications, reopening, and saved-frame restoration. It requires a macOS GUI session but not XCTest; `GLANCE_SDK_PATH` selects a specific installed SDK if needed.
+
+`test-repository-color-window.sh` opens the real Settings window to verify repository color deep links, including repeated links to the same repository. It requires a macOS GUI session, uses isolated fixture preferences, and never accesses your GitHub account. `GLANCE_SDK_PATH` selects a specific installed SDK if needed.
+
+For changes to hover captions, run `zsh scripts/test-tooltip-hover.sh` in a macOS GUI session. It builds for release, opens the actual floating dashboard with fixture rows, and uses Vision to verify rendered tooltips across successive hovers, reopening, and refreshing. `GLANCE_TOOLTIP_CONFIGURATION=debug` selects a debug build. Leave the mouse and keyboard idle during the check; loss of focus or pointer movement is reported separately from a tooltip failure. It restores the previous pointer position and active app afterwards and never uses your GitHub account or Glance profile.
 
 ## Pull requests
 
